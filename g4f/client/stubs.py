@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from typing import Optional, List, Dict, Any
+import os
+from typing import Optional, List
 from time import time
 
+from ..image import extract_data_uri
+from ..image.copy_images import images_dir
+from ..client.helper import filter_markdown
 from .helper import filter_none
 
 try:
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel
 except ImportError:
     class BaseModel():
         @classmethod
@@ -15,9 +19,6 @@ except ImportError:
             for key, value in data.items():
                 setattr(new, key, value)
             return new
-    class Field():
-        def __init__(self, **config):
-            pass
 
 class BaseModel(BaseModel):
     @classmethod
@@ -103,6 +104,19 @@ class ChatCompletionMessage(BaseModel):
     def model_construct(cls, content: str, tool_calls: list = None):
         return super().model_construct(role="assistant", content=content, **filter_none(tool_calls=tool_calls))
 
+    def save(self, filepath: str, allowd_types = None):
+        if hasattr(self.content, "data"):
+            os.rename(self.content.data.replace("/media", images_dir), filepath)
+            return
+        if self.content.startswith("data:"):
+            with open(filepath, "wb") as f:
+                f.write(extract_data_uri(self.content))
+            return
+        content = filter_markdown(self.content, allowd_types)
+        if content is not None:
+            with open(filepath, "w") as f:
+                f.write(content)
+
 class ChatCompletionChoice(BaseModel):
     index: int
     message: ChatCompletionMessage
@@ -118,8 +132,9 @@ class ChatCompletion(BaseModel):
     created: int
     model: str
     provider: Optional[str]
-    choices: List[ChatCompletionChoice]
+    choices: list[ChatCompletionChoice]
     usage: UsageModel
+    conversation: dict
 
     @classmethod
     def model_construct(
@@ -129,7 +144,8 @@ class ChatCompletion(BaseModel):
         completion_id: str = None,
         created: int = None,
         tool_calls: list[ToolCallModel] = None,
-        usage: UsageModel = None
+        usage: UsageModel = None,
+        conversation: dict = None
     ):
         return super().model_construct(
             id=f"chatcmpl-{completion_id}" if completion_id else None,
@@ -141,7 +157,7 @@ class ChatCompletion(BaseModel):
                 ChatCompletionMessage.model_construct(content, tool_calls),
                 finish_reason,
             )],
-            **filter_none(usage=usage)
+            **filter_none(usage=usage, conversation=conversation)
         )
 
 class ChatCompletionDelta(BaseModel):

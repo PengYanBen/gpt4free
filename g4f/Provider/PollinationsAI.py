@@ -3,31 +3,28 @@ from __future__ import annotations
 import json
 import random
 import requests
+import asyncio
 from urllib.parse import quote_plus
 from typing import Optional
 from aiohttp import ClientSession
 
 from .helper import filter_none, format_image_prompt
 from .base_provider import AsyncGeneratorProvider, ProviderModelMixin
-from ..typing import AsyncResult, Messages, ImagesType
-from ..image import to_data_uri
+from ..typing import AsyncResult, Messages, MediaListType
+from ..image import is_data_an_audio
 from ..errors import ModelNotFoundError
 from ..requests.raise_for_status import raise_for_status
 from ..requests.aiohttp import get_connector
-from ..providers.response import ImageResponse, ImagePreview, FinishReason, Usage, Audio, ToolCalls
+from ..image.copy_images import save_response_media
+from ..image import use_aspect_ratio
+from ..providers.response import FinishReason, Usage, ToolCalls, ImageResponse
+from ..tools.media import render_messages
 from .. import debug
 
 DEFAULT_HEADERS = {
     "accept": "*/*",
     'accept-language': 'en-US,en;q=0.9',
     "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-    "priority": "u=1, i",
-    "sec-ch-ua": "\"Not(A:Brand\";v=\"99\", \"Google Chrome\";v=\"133\", \"Chromium\";v=\"133\"",
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": "\"Linux\"",
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-site",
     "referer": "https://pollinations.ai/",
     "origin": "https://pollinations.ai",
 }
@@ -37,7 +34,6 @@ class PollinationsAI(AsyncGeneratorProvider, ProviderModelMixin):
     url = "https://pollinations.ai"
 
     working = True
-    supports_stream = False
     supports_system_message = True
     supports_message_history = True
 
@@ -52,8 +48,8 @@ class PollinationsAI(AsyncGeneratorProvider, ProviderModelMixin):
     default_vision_model = default_model
     text_models = [default_model]
     image_models = [default_image_model]
-    extra_image_models = ["flux-pro", "flux-dev", "flux-schnell", "midjourney", "dall-e-3"]
-    vision_models = [default_vision_model, "gpt-4o-mini", "o1-mini", "openai", "openai-large"]
+    extra_image_models = ["flux-pro", "flux-dev", "flux-schnell", "midjourney", "dall-e-3", "turbo"]
+    vision_models = [default_vision_model, "gpt-4o-mini", "o3-mini", "openai", "openai-large"]
     extra_text_models = vision_models
     _models_loaded = False
     model_aliases = {
@@ -61,7 +57,7 @@ class PollinationsAI(AsyncGeneratorProvider, ProviderModelMixin):
         "gpt-4o-mini": "openai",
         "gpt-4": "openai-large",
         "gpt-4o": "openai-large",
-        "o1-mini": "openai-reasoning",
+        "o3-mini": "openai-reasoning",
         "qwen-2.5-coder-32b": "qwen-coder",
         "llama-3.3-70b": "llama",
         "mistral-nemo": "mistral",
@@ -72,6 +68,8 @@ class PollinationsAI(AsyncGeneratorProvider, ProviderModelMixin):
         "gemini-2.0": "gemini",
         "gemini-2.0-flash": "gemini",
         "gemini-2.0-flash-thinking": "gemini-thinking",
+        "deepseek-r1": "deepseek-r1-llama",
+        "gpt-4o-audio": "openai-audio",
         
         ### Image Models ###
         "sdxl-turbo": "turbo",
@@ -115,10 +113,8 @@ class PollinationsAI(AsyncGeneratorProvider, ProviderModelMixin):
                 combined_text = (
                     cls.text_models +  # Already contains the default
                     cls.extra_text_models + 
-                    [
-                        model for model in original_text_models
-                        if model not in cls.extra_text_models
-                    ]
+                    original_text_models +
+                    cls.vision_models
                 )
                 cls.text_models = list(dict.fromkeys(combined_text))
                 
@@ -144,25 +140,35 @@ class PollinationsAI(AsyncGeneratorProvider, ProviderModelMixin):
         cache: bool = False,
         # Image generation parameters
         prompt: str = None,
-        width: int = 1024,
-        height: int = 1024,
+        aspect_ratio: str = "1:1",
+        width: int = None,
+        height: int = None,
         seed: Optional[int] = None,
         nologo: bool = True,
         private: bool = False,
         enhance: bool = False,
         safe: bool = False,
+        n: int = 1,
         # Text generation parameters
-        images: ImagesType = None,
+        media: MediaListType = None,
         temperature: float = None,
         presence_penalty: float = None,
-        top_p: float = 1,
+        top_p: float = None,
         frequency_penalty: float = None,
         response_format: Optional[dict] = None,
-        extra_parameters: list[str] = ["tools", "parallel_tool_calls", "tool_choice", "reasoning_effort", "logit_bias", "voice"],
+        extra_parameters: list[str] = ["tools", "parallel_tool_calls", "tool_choice", "reasoning_effort", "logit_bias", "voice", "modalities", "audio"],
         **kwargs
     ) -> AsyncResult:
         # Load model list
         cls.get_models()
+        if not model:
+            has_audio = "audio" in kwargs
+            if not has_audio and media is not None:
+                for media_data, filename in media:
+                    if is_data_an_audio(media_data, filename):
+                        has_audio = True
+                        break
+            model = next(iter(cls.audio_models)) if has_audio else model
         try:
             model = cls.get_model(model)
         except ModelNotFoundError:
@@ -174,6 +180,7 @@ class PollinationsAI(AsyncGeneratorProvider, ProviderModelMixin):
                 model=model,
                 prompt=format_image_prompt(messages, prompt),
                 proxy=proxy,
+                aspect_ratio=aspect_ratio,
                 width=width,
                 height=height,
                 seed=seed,
@@ -181,14 +188,15 @@ class PollinationsAI(AsyncGeneratorProvider, ProviderModelMixin):
                 nologo=nologo,
                 private=private,
                 enhance=enhance,
-                safe=safe
+                safe=safe,
+                n=n
             ):
                 yield chunk
         else:
             async for result in cls._generate_text(
                 model=model,
                 messages=messages,
-                images=images,
+                media=media,
                 proxy=proxy,
                 temperature=temperature,
                 presence_penalty=presence_penalty,
@@ -209,6 +217,7 @@ class PollinationsAI(AsyncGeneratorProvider, ProviderModelMixin):
         model: str,
         prompt: str,
         proxy: str,
+        aspect_ratio: str,
         width: int,
         height: int,
         seed: Optional[int],
@@ -216,36 +225,47 @@ class PollinationsAI(AsyncGeneratorProvider, ProviderModelMixin):
         nologo: bool,
         private: bool,
         enhance: bool,
-        safe: bool
+        safe: bool,
+        n: int
     ) -> AsyncResult:
-        if not cache and seed is None:
-            seed = random.randint(9999, 99999999)
-        params = {
-            "seed": str(seed) if seed is not None else None,
-            "width": str(width),
-            "height": str(height),
+        params = use_aspect_ratio({
+            "width": width,
+            "height": height,
             "model": model,
             "nologo": str(nologo).lower(),
             "private": str(private).lower(),
             "enhance": str(enhance).lower(),
             "safe": str(safe).lower()
-        }
-        query = "&".join(f"{k}={quote_plus(v)}" for k, v in params.items() if v is not None)
-        url = f"{cls.image_api_endpoint}prompt/{quote_plus(prompt)}?{query}"
-        #yield ImagePreview(url, prompt)
-
+        }, aspect_ratio)
+        query = "&".join(f"{k}={quote_plus(str(v))}" for k, v in params.items() if v is not None)
+        prompt = quote_plus(prompt)[:2048-256-len(query)]
+        url = f"{cls.image_api_endpoint}prompt/{prompt}?{query}"
+        def get_image_url(i: int = 0, seed: Optional[int] = None):
+            if i == 0:
+                if not cache and seed is None:
+                    seed = random.randint(0, 2**32)
+            else:
+                seed = random.randint(0, 2**32)
+            return f"{url}&seed={seed}" if seed else url
         async with ClientSession(headers=DEFAULT_HEADERS, connector=get_connector(proxy=proxy)) as session:
-            async with session.get(url, allow_redirects=True) as response:
-                await raise_for_status(response)
-                image_url = str(response.url)
-                yield ImageResponse(image_url, prompt)
+            async def get_image(i: int = 0, seed: Optional[int] = None):
+                async with session.get(get_image_url(i, seed), allow_redirects=False) as response:
+                    try:
+                        await raise_for_status(response)
+                    except Exception as e:
+                        debug.error(f"Error fetching image: {e}")
+                        return str(response.url)
+                    return str(response.url)
+            yield ImageResponse(await asyncio.gather(*[
+                get_image(i, seed) for i in range(int(n))
+            ]), prompt)
 
     @classmethod
     async def _generate_text(
         cls,
         model: str,
         messages: Messages,
-        images: Optional[ImagesType],
+        media: MediaListType,
         proxy: str,
         temperature: float,
         presence_penalty: float,
@@ -264,28 +284,15 @@ class PollinationsAI(AsyncGeneratorProvider, ProviderModelMixin):
         if response_format and response_format.get("type") == "json_object":
             json_mode = True
 
-        if images and messages:
-            last_message = messages[-1].copy()
-            image_content = [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": to_data_uri(image)}
-                }
-                for image, _ in images
-            ]
-            last_message["content"] = image_content + [{"type": "text", "text": last_message["content"]}]
-            messages[-1] = last_message
-
         async with ClientSession(headers=DEFAULT_HEADERS, connector=get_connector(proxy=proxy)) as session:
             if model in cls.audio_models:
-                #data["voice"] = random.choice(cls.audio_models[model])
                 url = cls.text_api_endpoint
                 stream = False
             else:
                 url = cls.openai_endpoint
             extra_parameters = {param: kwargs[param] for param in extra_parameters if param in kwargs}
             data = filter_none(**{
-                "messages": messages,
+                "messages": list(render_messages(messages, media)),
                 "model": model,
                 "temperature": temperature,
                 "presence_penalty": presence_penalty,
@@ -299,10 +306,10 @@ class PollinationsAI(AsyncGeneratorProvider, ProviderModelMixin):
             })
             async with session.post(url, json=data) as response:
                 await raise_for_status(response)
-                if response.headers["content-type"] == "audio/mpeg":
-                    yield Audio(await response.read())
+                async for chunk in save_response_media(response, format_image_prompt(messages), [model]):
+                    yield chunk
                     return
-                elif response.headers["content-type"].startswith("text/plain"):
+                if response.headers["content-type"].startswith("text/plain"):
                     yield await response.text()
                     return
                 elif response.headers["content-type"].startswith("text/event-stream"):

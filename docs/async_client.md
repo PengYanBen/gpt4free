@@ -19,7 +19,9 @@ The G4F AsyncClient API is designed to be compatible with the OpenAI API, making
    - [Text Completions](#text-completions)
    - [Streaming Completions](#streaming-completions)
    - [Using a Vision Model](#using-a-vision-model)
+   - **[Transcribing Audio with Chat Completions](#transcribing-audio-with-chat-completions)** *(New Section)*
    - [Image Generation](#image-generation)
+   - **[Video Generation](#video-generation)** *(New Section)*
    - [Advanced Usage](#advanced-usage)
    - [Conversation Memory](#conversation-memory)
    - [Search Tool Support](#search-tool-support)
@@ -203,6 +205,54 @@ async def main():
 asyncio.run(main())
 ```
 
+---
+
+### Transcribing Audio with Chat Completions
+
+Some providers in G4F support audio inputs in chat completions, allowing you to transcribe audio files by instructing the model accordingly. This example demonstrates how to use the `AsyncClient` to transcribe an audio file asynchronously:
+
+```python
+import asyncio
+from g4f.client import AsyncClient
+import g4f.Provider
+import g4f.models
+
+async def main():
+    client = AsyncClient(provider=g4f.Provider.PollinationsAI)  # or g4f.Provider.Microsoft_Phi_4
+
+    with open("audio.wav", "rb") as audio_file:
+        response = await client.chat.completions.create(
+            model=g4f.models.default,
+            messages=[{"role": "user", "content": "Transcribe this audio"}],
+            media=[[audio_file, "audio.wav"]],
+            modalities=["text"],
+        )
+
+    print(response.choices[0].message.content)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+#### Explanation
+- **Client Initialization**: An `AsyncClient` instance is created with a provider that supports audio inputs, such as `PollinationsAI` or `Microsoft_Phi_4`.
+- **File Handling**: The audio file (`audio.wav`) is opened in binary read mode (`"rb"`) using a context manager (`with` statement) to ensure proper file closure after use.
+- **API Call**: The `chat.completions.create` method is called with:
+  - `model=g4f.models.default`: Uses the default model for the selected provider.
+  - `messages`: A list containing a user message instructing the model to transcribe the audio.
+  - `media`: A list of lists, where each inner list contains the file object and its name (`[[audio_file, "audio.wav"]]`).
+  - `modalities=["text"]`: Specifies that the output should be text (the transcription).
+- **Response**: The transcription is extracted from `response.choices[0].message.content` and printed.
+
+#### Notes
+- **Provider Support**: Ensure the chosen provider (e.g., `PollinationsAI` or `Microsoft_Phi_4`) supports audio inputs in chat completions. Not all providers may offer this functionality.
+- **File Path**: Replace `"audio.wav"` with the path to your own audio file. The file format (e.g., WAV) should be compatible with the provider.
+- **Model Selection**: If `g4f.models.default` does not support audio transcription, you may need to specify a model that does (consult the provider's documentation for supported models).
+
+This example complements the guide by showcasing how to handle audio inputs asynchronously, expanding on the multimodal capabilities of the G4F AsyncClient API.
+
+---
+
 ### Image Generation
 **The `response_format` parameter is optional and can have the following values:**
 - **If not specified (default):** The image will be saved locally, and a local path will be returned (e.g., "/images/1733331238_cf9d6aa9-f606-4fea-ba4b-f06576cba309.jpg").
@@ -278,6 +328,46 @@ asyncio.run(main())
 
 ---
 
+### Video Generation
+
+The G4F `AsyncClient` also supports **video generation** through supported providers like `HuggingFaceMedia`. You can retrieve the list of available video models and generate videos from prompts.
+
+**Example: Generate a video using a prompt**
+
+```python
+import asyncio
+from g4f.client import AsyncClient
+from g4f.Provider import HuggingFaceMedia
+
+async def main():
+    client = AsyncClient(
+        provider=HuggingFaceMedia,
+        api_key="hf_***"  # Your API key here
+    )
+
+    # Get available video models
+    video_models = client.models.get_video()
+    print("Available Video Models:", video_models)
+
+    # Generate video
+    result = await client.media.generate(
+        model=video_models[0],
+        prompt="G4F AI technology is the best in the world.",
+        response_format="url"
+    )
+
+    print("Generated Video URL:", result.data[0].url)
+
+asyncio.run(main())
+```
+
+#### Explanation
+- **Client Initialization**: An `AsyncClient` is initialized using the `HuggingFaceMedia` provider with an API key.
+- **Model Discovery**: `client.models.get_video()` fetches a list of supported video models.
+- **Video Generation**: A prompt is submitted to generate a video using `await client.media.generate(...)`.
+- **Output**: The result includes a URL to the generated video, accessed via `result.data[0].url`.
+
+> Make sure your selected provider supports media generation and your API key has appropriate permissions.
 
 ## Advanced Usage
 

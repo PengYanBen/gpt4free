@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 
 from ..typing import AsyncResult, Messages, Cookies
-from .base_provider import AsyncGeneratorProvider, ProviderModelMixin, get_running_loop
+from .base_provider import AsyncGeneratorProvider, ProviderModelMixin, AuthFileMixin, get_running_loop
 from ..requests import Session, StreamSession, get_args_from_nodriver, raise_for_status, merge_cookies
 from ..requests import DEFAULT_HEADERS, has_nodriver, has_curl_cffi
-from ..providers.response import FinishReason
-from ..cookies import get_cookies_dir
+from ..providers.response import FinishReason, Usage
 from ..errors import ResponseStatusError, ModelNotFoundError
 
-class Cloudflare(AsyncGeneratorProvider, ProviderModelMixin):
+class Cloudflare(AsyncGeneratorProvider, ProviderModelMixin, AuthFileMixin):
     label = "Cloudflare AI"
     url = "https://playground.ai.cloudflare.com"
     working = True
@@ -35,10 +33,6 @@ class Cloudflare(AsyncGeneratorProvider, ProviderModelMixin):
         "qwen-1.5-7b": "@cf/qwen/qwen1.5-7b-chat-awq",
     }
     _args: dict = None
-
-    @classmethod
-    def get_cache_file(cls) -> Path:
-        return Path(get_cookies_dir()) / f"auth_{cls.parent if hasattr(cls, 'parent') else cls.__name__}.json"
 
     @classmethod
     def get_models(cls) -> str:
@@ -79,7 +73,7 @@ class Cloudflare(AsyncGeneratorProvider, ProviderModelMixin):
             if cache_file.exists():
                 with cache_file.open("r") as f:
                     cls._args = json.load(f)
-            if has_nodriver:
+            elif has_nodriver:
                 cls._args = await get_args_from_nodriver(cls.url, proxy, timeout, cookies)
             else:
                 cls._args = {"headers": DEFAULT_HEADERS, "cookies": {}}
@@ -88,11 +82,16 @@ class Cloudflare(AsyncGeneratorProvider, ProviderModelMixin):
         except ModelNotFoundError:
             pass
         data = {
-            "messages": messages,
+            "messages": [{
+                **message,
+                "content": message["content"] if isinstance(message["content"], str) else "",
+                "parts": [{"type":"text", "text":message["content"]}] if isinstance(message["content"], str) else message} for message in messages],
             "lora": None,
             "model": model,
             "max_tokens": max_tokens,
-            "stream": True
+            "stream": True,
+            "system_message":"You are a helpful assistant",
+            "tools":[]
         }
         async with StreamSession(**cls._args) as session:
             async with session.post(
@@ -107,22 +106,13 @@ class Cloudflare(AsyncGeneratorProvider, ProviderModelMixin):
                     if cache_file.exists():
                         cache_file.unlink()
                     raise
-                reason = None
                 async for line in response.iter_lines():
-                    if line.startswith(b'data: '):
-                        if line == b'data: [DONE]':
-                            break
-                        try:
-                            content = json.loads(line[6:].decode())
-                            if content.get("response") and content.get("response") != '</s>':
-                                yield content['response']
-                                reason = "max_tokens"
-                            elif content.get("response") == '':
-                                reason = "stop"
-                        except Exception:
-                            continue
-                if reason is not None:
-                    yield FinishReason(reason)
+                    if line.startswith(b'0:'):
+                        yield json.loads(line[2:])
+                    elif line.startswith(b'e:'):
+                        finish = json.loads(line[2:])
+                        yield Usage(**finish.get("usage"))
+                        yield FinishReason(finish.get("finishReason"))
 
                 with cache_file.open("w") as f:
                     json.dump(cls._args, f)

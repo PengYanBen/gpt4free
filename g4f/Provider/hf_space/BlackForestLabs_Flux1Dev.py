@@ -6,13 +6,15 @@ import uuid
 from ...typing import AsyncResult, Messages
 from ...providers.response import ImageResponse, ImagePreview, JsonConversation, Reasoning
 from ...requests import StreamSession
+from ...image import use_aspect_ratio
 from ...errors import ResponseError
 from ..base_provider import AsyncGeneratorProvider, ProviderModelMixin
 from ..helper import format_image_prompt
-from .Janus_Pro_7B import get_zerogpu_token
+from .DeepseekAI_JanusPro7b import get_zerogpu_token
 from .raise_for_status import raise_for_status
 
-class BlackForestLabsFlux1Dev(AsyncGeneratorProvider, ProviderModelMixin):
+class BlackForestLabs_Flux1Dev(AsyncGeneratorProvider, ProviderModelMixin):
+    label = "BlackForestLabs Flux-1-Dev"
     url = "https://black-forest-labs-flux-1-dev.hf.space"
     space = "black-forest-labs/FLUX.1-dev"
     referer = f"{url}/?__theme=light"
@@ -21,8 +23,8 @@ class BlackForestLabsFlux1Dev(AsyncGeneratorProvider, ProviderModelMixin):
 
     default_model = 'black-forest-labs-flux-1-dev'
     default_image_model = default_model
-    model_aliases = {"flux-dev": default_model, "flux": default_model}
-    image_models = [default_image_model, *model_aliases.keys()]
+    model_aliases = {"flux-dev": default_image_model, "flux": default_image_model}
+    image_models = list(model_aliases.keys())
     models = image_models
 
     @classmethod
@@ -55,8 +57,9 @@ class BlackForestLabsFlux1Dev(AsyncGeneratorProvider, ProviderModelMixin):
         messages: Messages,
         prompt: str = None,
         proxy: str = None,
-        width: int = 1024,
-        height: int = 1024,
+        aspect_ratio: str = "1:1",
+        width: int = None,
+        height: int = None,
         guidance_scale: float = 3.5,
         num_inference_steps: int = 28,
         seed: int = 0,
@@ -66,10 +69,10 @@ class BlackForestLabsFlux1Dev(AsyncGeneratorProvider, ProviderModelMixin):
         zerogpu_uuid: str = "[object Object]",
         **kwargs
     ) -> AsyncResult:
-        model = cls.get_model(model)
         async with StreamSession(impersonate="chrome", proxy=proxy) as session:
             prompt = format_image_prompt(messages, prompt)
-            data = [prompt, seed, randomize_seed, width, height, guidance_scale, num_inference_steps]
+            data = use_aspect_ratio({"width": width, "height": height}, aspect_ratio)
+            data = [prompt, seed, randomize_seed, data.get("width"), data.get("height"), guidance_scale, num_inference_steps]
             conversation = JsonConversation(zerogpu_token=api_key, zerogpu_uuid=zerogpu_uuid, session_hash=uuid.uuid4().hex)
             if conversation.zerogpu_token is None:
                 conversation.zerogpu_uuid, conversation.zerogpu_token = await get_zerogpu_token(cls.space, session, conversation, cookies)

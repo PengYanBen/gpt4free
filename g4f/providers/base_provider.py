@@ -20,21 +20,21 @@ from .asyncio import get_running_loop, to_sync_generator, to_async_iterator
 from .response import BaseConversation, AuthResult
 from .helper import concat_chunks
 from ..cookies import get_cookies_dir
-from ..errors import ModelNotSupportedError, ResponseError, MissingAuthError, NoValidHarFileError
+from ..errors import ModelNotSupportedError, ResponseError, MissingAuthError, NoValidHarFileError, PaymentRequiredError
 from .. import debug
 
 SAFE_PARAMETERS = [
     "model", "messages", "stream", "timeout",
-    "proxy", "images", "response_format",
+    "proxy", "media", "response_format",
     "prompt", "negative_prompt", "tools", "conversation",
-    "history_disabled", "auto_continue",
+    "history_disabled",
     "temperature",  "top_k", "top_p",
     "frequency_penalty", "presence_penalty",
-    "max_tokens", "max_new_tokens", "stop",
+    "max_tokens", "stop",
     "api_key", "api_base", "seed", "width", "height",
-    "proof_token", "max_retries", "web_search",
+    "max_retries", "web_search",
     "guidance_scale", "num_inference_steps", "randomize_seed",
-    "safe", "enhance", "private", "aspect_ratio", "images_num",
+    "safe", "enhance", "private", "aspect_ratio", "n",
 ]
 
 BASIC_PARAMETERS = {
@@ -44,8 +44,8 @@ BASIC_PARAMETERS = {
     "stream": False,
     "timeout": 0,
     "response_format": None,
-    "max_tokens": None,
-    "stop": None,
+    "max_tokens": 4096,
+    "stop": ["stop1", "stop2"],
 }
 
 PARAMETER_EXAMPLES = {
@@ -56,13 +56,10 @@ PARAMETER_EXAMPLES = {
     "frequency_penalty": 1,
     "presence_penalty": 1,
     "messages": [{"role": "system", "content": ""}, {"role": "user", "content": ""}],
-    "images": [["data:image/jpeg;base64,...", "filename.jpg"]],
+    "media": [["data:image/jpeg;base64,...", "filename.jpg"]],
     "response_format": {"type": "json_object"},
     "conversation": {"conversation_id": "550e8400-e29b-11d4-a716-...", "message_id": "550e8400-e29b-11d4-a716-..."},
-    "max_new_tokens": 1024,
-    "max_tokens": 4096,
     "seed": 42,
-    "stop": ["stop1", "stop2"],
     "tools": [],
 }
 
@@ -369,12 +366,20 @@ class ProviderModelMixin:
 class RaiseErrorMixin():
 
     @staticmethod
-    def raise_error(data: dict):
+    def raise_error(data: dict, status: int = None):
         if "error_message" in data:
             raise ResponseError(data["error_message"])
         elif "error" in data:
             if isinstance(data["error"], str):
+                if status is not None:
+                    if status == 401:
+                        raise MissingAuthError(f"Error {status}: {data['error']}")
+                    elif status == 402:
+                        raise PaymentRequiredError(f"Error {status}: {data['error']}")
+                    raise ResponseError(f"Error {status}: {data['error']}")
                 raise ResponseError(data["error"])
+            elif isinstance(data["error"], bool):
+                raise ResponseError(data)
             elif "code" in data["error"]:
                 raise ResponseError("\n".join(
                     [e for e in [f'Error {data["error"]["code"]}: {data["error"]["message"]}', data["error"].get("failed_generation")] if e is not None]
@@ -386,7 +391,13 @@ class RaiseErrorMixin():
         elif ("choices" not in data or not data["choices"]) and "data" not in data:
             raise ResponseError(f"Invalid response: {json.dumps(data)}")
 
-class AsyncAuthedProvider(AsyncGeneratorProvider):
+class AuthFileMixin():
+
+    @classmethod
+    def get_cache_file(cls) -> Path:
+        return Path(get_cookies_dir()) / f"auth_{cls.parent if hasattr(cls, 'parent') else cls.__name__}.json"
+
+class AsyncAuthedProvider(AsyncGeneratorProvider, AuthFileMixin):
 
     @classmethod
     async def on_auth_async(cls, **kwargs) -> AuthResult:
@@ -408,10 +419,6 @@ class AsyncAuthedProvider(AsyncGeneratorProvider):
     @classmethod
     def get_async_create_function(cls) -> callable:
         return cls.create_async_generator
-
-    @classmethod
-    def get_cache_file(cls) -> Path:
-        return Path(get_cookies_dir()) / f"auth_{cls.parent if hasattr(cls, 'parent') else cls.__name__}.json"
 
     @classmethod
     def write_cache_file(cls, cache_file: Path, auth_result: AuthResult = None):

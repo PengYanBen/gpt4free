@@ -5,11 +5,13 @@ from aiohttp import ClientSession
 
 from ...typing import AsyncResult, Messages
 from ...providers.response import ImageResponse, ImagePreview
+from ...image import use_aspect_ratio
 from ...errors import ResponseError
 from ..base_provider import AsyncGeneratorProvider, ProviderModelMixin
 from ..helper import format_image_prompt
 
-class StableDiffusion35Large(AsyncGeneratorProvider, ProviderModelMixin):
+class StabilityAI_SD35Large(AsyncGeneratorProvider, ProviderModelMixin):
+    label = "StabilityAI SD-3.5-Large"
     url = "https://stabilityai-stable-diffusion-3-5-large.hf.space"
     api_endpoint = "/gradio_api/call/infer"
 
@@ -17,9 +19,9 @@ class StableDiffusion35Large(AsyncGeneratorProvider, ProviderModelMixin):
 
     default_model = 'stabilityai-stable-diffusion-3-5-large'
     default_image_model = default_model
-    image_models = [default_model]
-    models = image_models
     model_aliases = {"sd-3.5": default_model}
+    image_models = list(model_aliases.keys())
+    models = image_models
 
     @classmethod
     async def create_async_generator(
@@ -28,8 +30,9 @@ class StableDiffusion35Large(AsyncGeneratorProvider, ProviderModelMixin):
         negative_prompt: str = None,
         api_key: str = None, 
         proxy: str = None,
-        width: int = 1024,
-        height: int = 1024,
+        aspect_ratio: str = "1:1",
+        width: int = None,
+        height: int = None,
         guidance_scale: float = 4.5,
         num_inference_steps: int = 50,
         seed: int = 0,
@@ -44,8 +47,9 @@ class StableDiffusion35Large(AsyncGeneratorProvider, ProviderModelMixin):
             headers["Authorization"] = f"Bearer {api_key}"
         async with ClientSession(headers=headers) as session:
             prompt = format_image_prompt(messages, prompt)
+            data = use_aspect_ratio({"width": width, "height": height}, aspect_ratio)
             data = {
-                "data": [prompt, negative_prompt, seed, randomize_seed, width, height, guidance_scale, num_inference_steps]
+                "data": [prompt, negative_prompt, seed, randomize_seed, data.get("width"), data.get("height"), guidance_scale, num_inference_steps]
             }
             async with session.post(f"{cls.url}{cls.api_endpoint}", json=data, proxy=proxy) as response:
                 response.raise_for_status()
